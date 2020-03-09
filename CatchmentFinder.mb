@@ -1,0 +1,1091 @@
+' XXXXXXXXXXXXXXXXXXXXXXXXx
+' X
+' X  Catchment Boundary Generator
+' X
+' X  Written: Feb 2005 - Ashley Crane, MapInfo
+' X
+' X  Purpose: Demonstrate concept of selecting boundaries around single point to meet criteria
+' X
+' X  Note: Code written as proof of concept only, is not supported and not originally intended for commerical use
+' X
+' XXXXXXXXXXXXXXXXXXXXXXXXX
+'
+'
+'	TODO List:
+'	1. [DONE] Create table for catchments
+'	2. Handle overlaps/not meeting minimum points
+'	3. [DONE] Honour styles for catchments
+'	4. [DONE] Build catchments based on numeric field (not Count based)
+'	5. [DONE] Review query tables (& cleanup)
+'
+'
+
+INCLUDE "mapbasic.def"
+INCLUDE "menu.def"
+INCLUDE "icons.def"
+
+DECLARE SUB	Main
+DECLARE SUB	End_Program
+DECLARE SUB	Build_BP
+DECLARE SUB	About
+'Declare Sub	Create_Catchment
+Declare Sub	Create_Catchmentv2
+Declare Sub chk_rnd
+Declare Sub chk_filename
+Declare Sub TableOps(byval strTableName as string)
+Declare Function opentabs$() as string
+Declare Function getliststring$(byval inlist as string, byval choice as smallint) as string
+Declare Function FixWhiteSpace(ByVal strInput as string) as string
+Declare Function SumWithinBuffer(ByVal fltTestDistance as float, ByVal strBaseTable as string, ByVal strCol as string, ByVal fltCentreX as float, ByVal fltCentreY as float) as float
+Declare Function CheckLayerOpen(ByVal strLayerName as string) as logical
+Declare Function CheckFieldExists(ByVal strTableName as string, ByVal strFieldName as string) as logical
+Declare Function BuildDateTimeStamp() as string
+
+global strCollist as string
+global strTableList as string
+global rnd_col, rnd_col2, rnd_col3 as smallint		'2 = children/origin, 1 = sites
+global t_rnd, t_rnd2, col_name, col_list as string '2 = children/origin, 1 = sites
+global double as logical
+global fltX as float
+global fltY as float
+global tagDebug as logical
+global gstrFileName as string
+
+SUB Main
+'	Print chr$(12)		' This clears the message box
+
+	CALL Build_BP
+
+END SUB
+
+Sub Build_BP
+
+	Create ButtonPad "Catchment Finder" As
+		PushButton
+			Icon 79  '*** These icons are from the standard set that MapInfo provides.
+			Calling Create_Catchmentv2
+			HelpMsg "Catchment Finder v2 \nCatchment Finder v2"
+			'*** The text after the "\n" is the ToolTip message.
+		Separator
+		PushButton
+			Icon 231  '*** These icons are from the standard set that MapInfo provides.
+			Calling About
+			HelpMsg "About Catchment Finder \nAbout Catchment Finder"
+			'*** The text after the "\n" is the ToolTip message.
+		Pushbutton
+			Icon 275
+			Calling End_Program
+			HelpMsg "End Program \nEnd Program"
+		Tab "tabAnalysisv5|ANALYSIS"
+
+'	Alter ButtonPad "Catchment Finder" Float
+'	'	ToolBarPosition (0,10)
+'		Width 4
+'		Position (7.1,1.6) Units "in"
+
+End Sub
+
+SUB End_Program
+'	Create Menu Bar as Default
+'  	Close Window Message
+'	Close Window Legend
+'	Alter ButtonPad "Catchment Finder" Destroy
+
+  	End Program
+END SUB
+
+Sub Create_Catchmentv2
+
+	Dim intTableID as integer
+	Dim intFieldID as integer
+	Dim strUniqueName as string
+	'Dim tagCreateAll as logical
+	Dim tagCatchmentRadius as logical
+	Dim tagSiteOrigin as logical
+	Dim tagAllowOverlap as logical
+	Dim intCatchmentType as integer
+	Dim intCatchmentDef as integer
+	Dim strMaxValue as string
+	'Dim strFileName as string
+	Dim styleSymbol as symbol
+	Dim stylePen as pen
+	Dim styleBrush as brush
+	Dim intSumField as integer
+
+	'Master debug tag here, set this to TRUE to print all debug messages
+	'tagDebug = True
+
+	'1. check for map window
+	If WindowInfo(FrontWindow(),WIN_INFO_TYPE) <> WIN_MAPPER Then
+		Note "Please select Map Window as front window!"
+		Exit Sub
+	End If
+
+	styleSymbol = MakeSymbol(36,BLUE,12)
+	stylePen = MakePen(1,2,RED)
+	styleBrush = MakeBrush(1, WHITE, WHITE)
+	gstrFileName = "Catchments"
+
+	Dim strTable as string
+	strTableList = opentabs$()
+
+		Dialog Title "Catchment Boundary Generator"
+			control statictext title "1. Choose Sites Table:" position 10,10
+			control listbox id 1 value 0 title strTableList height 90 position 15,20 width 90 calling chk_rnd
+			control statictext id 2 hide title "Choose ID Field:" position 10,118
+			control listbox id 3 hide position 15,131 into rnd_col Height 65 width 90 calling chk_rnd
+			control statictext title "2. Choose Origins Table:" position 120,10
+			control listbox id 4 value 0 title strTableList height 90 position 125,20 width 90 calling chk_rnd
+			control statictext id 5 hide title "Choose ID Field:" position 125,118
+			control listbox id 6 hide position 125,131 into rnd_col2 Height 65 width 90 calling chk_rnd
+
+			control statictext id 18 title "3. Set Options:" position 225,10
+			control checkbox title "Tag Origins with Site ID" Position 225,20 Value false into tagSiteOrigin
+			control checkbox title "Allow Catchment Boundary Overlaps" Position 225,35 Value false into tagAllowOverlap Disable
+			control statictext id 19 title "Catchment Boundary Definition:" position 225,50
+			control popupmenu title "Radius;Convex Hull;Combine Objs;Spider;None" Position 225,61 Width 70 Value 2 into intCatchmentDef
+			control statictext id 21 title "Catchment Type:" position 225,76
+			control popupmenu id 28 title "Count;Sum of Field" Position 225,87 Width 70 Value 1 into intCatchmentType calling chk_rnd
+			control statictext id 20 title "Count/Sum Limit:" position 300,76
+			control edittext position 300,87 width 35 value "10" into strMaxValue
+			control statictext id 26 title "Field to Sum:" position 225,102
+			control popupmenu id 27 title "<No Data>" position 225,113 Width 70 into rnd_col3 calling chk_rnd Disable
+			control statictext id 22 title "Output Catchment File Name:" position 225,128
+			control edittext position 225,139 width 70 value gstrFileName into gstrFileName 'calling chk_filename
+			control statictext id 23 title "Select Catchment Styles:" position 225,154
+			control SymbolPicker id 24 position 225,165 value styleSymbol Into styleSymbol
+			control PenPicker id 25 position 250,165 value stylePen Into stylePen
+			control BrushPicker id 29 position 275,165 value styleBrush Into styleBrush
+
+			control CancelButton
+			control OKButton
+
+		If commandinfo(CMD_INFO_DLG_OK) or double then
+
+			'Hidden feature, if User has added prefix "xx" to the Output file name this is the debug mode
+			If Left$(gstrFileName, 2) = "xx" then
+
+				gstrFileName = Right$(gstrFileName,Len(gstrFileName) - 2)
+
+				tagDebug = True
+				print "-x-x-x- Debug Mode Enabled -x-x-x-"
+			Else
+				tagDebug = False
+			End If
+
+		else
+			exit sub
+		End If
+
+	Dim strBaseTable as string
+	Dim objBase as object
+	Dim alsBase as alias
+	Dim objCentroid as object
+	Dim strSQL as string
+	Dim strTempBrowserName as string
+
+	Set CoordSys Table t_rnd
+	Set Style Pen stylePen
+	Set Style Symbol styleSymbol
+	Set Style Brush styleBrush
+
+	If tagDebug = true then
+		print "strBaseTable: " + str$(strBaseTable)
+		print "tagSiteOrigin: " + str$(tagSiteOrigin)
+		print "tagAllowOverlap: " + str$(tagAllowOverlap)
+		print "intCatchmentType: " + str$(intCatchmentType)
+		print "intCatchmentDef: " + str$(intCatchmentDef)
+		print "t_rnd: " + str$(t_rnd)
+		print "rnd_col: " + str$(rnd_col) + " : " +  ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME)
+		print "t_rnd2: " + str$(t_rnd2)
+		print "rnd_col2: " + str$(rnd_col2) + " : " +  ColumnInfo(t_rnd2,"COL" & Str$(rnd_col2),COL_INFO_NAME)
+		print "rnd_col3: " + str$(rnd_col3) + " : " + ColumnInfo(t_rnd2,"COL" & str$(rnd_col3),COL_INFO_NAME)
+		print "strMaxValue: " + str$(strMaxValue)
+		print "gstrFileName: " + str$(gstrFileName)
+	end if
+
+	'run a check to ensure that the value entered as the catchment total is numeric
+	Dim strCheckValue as string
+	strCheckValue = Left$(LTrim$(strMaxValue),1)
+
+	If Asc(strCheckValue)<48 or Asc(strCheckValue)>57 then
+		'table total doesn't exceed target total!
+		Note "Please enter a numeric catchment value!"
+		Exit Sub
+	End If
+
+	'check Dump table open & empty
+'	If CheckLayerOpen("tmpBrowser") = 0 then
+'		Note "Sorry - Temp Working TAB Not Available"
+'		Exit Sub
+'	else
+'		'assume it is open, clear it out
+'		Delete from tmpBrowser
+'	End If
+
+	If rnd_col2 = rnd_col3 then
+		Note "Unique ID <> Field to Sum!"
+		Exit Sub
+	End If
+
+	Call TableOps(gstrFileName)
+
+	Set Event Processing Off
+
+	'Create temp table (tmpBrowser)
+	'strPathTableName = ApplicationDirectory$() + strCompleteName
+
+	If tagDebug = True then
+		Print "Create tmpBrowser"
+	End If
+
+	strTempBrowserName = "tmpBrowser"
+
+	Create Table strTempBrowserName (Origin_ID Integer, Dest_ID Integer, Distance Float, Value Float) file ApplicationDirectory$() + strTempBrowserName  TYPE NATIVE Charset "WindowsLatin1"
+	Create Map For strTempBrowserName  'CoordSys Using t_rnd2
+
+	'build big matrix
+	If intCatchmentType = 1 then
+		'we are doing pure count so need to set max value for Nearest
+		strSQL = "Nearest " & strMaxValue & " From Table " & t_rnd & " To " & t_rnd2 & " Into tmpBrowser Data Origin_ID=" & t_rnd2 & "." & ColumnInfo(t_rnd2,"COL" & Str$(rnd_col2),COL_INFO_NAME) & ", Dest_ID=" & t_rnd & "." & ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME) & ", Distance=ObjectDistance(" & t_rnd2 & ".obj, " & t_rnd & ".obj, ""km"")"
+	else
+		'we are using numeric field to SUM, so need to calc nearest for ALL destination points
+		strSQL = "Nearest 1 From Table " & t_rnd2 & " To " & t_rnd & " Into tmpBrowser Data Origin_ID=" & t_rnd2 & "." & ColumnInfo(t_rnd2,"COL" & Str$(rnd_col2),COL_INFO_NAME) & ", Dest_ID=" & t_rnd & "." & ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME) & ", Distance=ObjectDistance(" & t_rnd2 & ".obj, " & t_rnd & ".obj, ""km""), Value=" & t_rnd2 & "." & ColumnInfo(t_rnd2,"COL" & Str$(rnd_col3),COL_INFO_NAME)
+	end if
+
+	If tagDebug = True then
+		Print strSQL
+	End If
+
+	Run Command strSQL
+
+	If tagDebug = True then
+		Print "-x-x-x- Entering Loop -x-x-x-"
+	End If
+
+	'OK Setup Loop
+
+	'Dim fltCurrentSearchRadius as float
+	'Dim fltCurrentTotal as float
+	'Dim fltTarget as float
+	Dim objBuilder as object
+	Dim objTarget as object
+	Dim alsTarget as alias
+	Dim intTargetID as integer
+	Dim strCosmetic as string
+	Dim fltMaxDistance as float
+	Dim objBuffer as object
+	Dim fltRollingSum as float
+	Dim fltTempValue as float
+	Dim fltRowID as float
+	Dim fltWorkingID as float
+	Dim tagLimitExceeded as logical
+	Dim intCatchmentID(1) as integer
+	Dim fltCatchmentUpper(1) as float
+	Dim intCatchmentCount as integer
+	Dim intCounter as integer
+	Dim i as integer
+	Dim intRowIDCapture as integer
+	Dim strQueryTableName as string
+
+	If intCatchmentType = 2 then
+		'User has selected to define catchments by SUM'ing a numeric field
+		'need to loop thru Master table & delete rows beyond sum value
+		'1. setup loop for each Site
+		'2. reset Sum value
+		'3. extract from tmpBrowser into query table for each site
+		'4. if [Total_Sum] + Row_Sum > Upper Limit then delete
+
+		intCatchmentCount = TableInfo(t_rnd, TAB_INFO_NROWS)
+		ReDim intCatchmentID(intCatchmentCount + 1)
+		ReDim fltCatchmentUpper(intCatchmentCount + 1)
+		intCounter = 1
+
+		Fetch First From t_rnd
+		Do While Not EOT(t_rnd)
+			'so for each individual catchment let's sum up
+			alsTarget = t_rnd + "." +  ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME)
+			intTargetID = alsTarget
+			fltRollingSum = 0
+
+			'build a temp table just for this catchment by filtering on the ID
+			Select * from tmpBrowser order by Distance Where Dest_ID = intTargetID into qrySumBuild NoSelect
+			tagLimitExceeded = False
+
+				Fetch First from qrySumBuild
+				Do While Not EOT(qrySumBuild)		'tagLimitExceeded = False
+
+					alsTarget = qrySumBuild & ".Value"
+					fltTempValue = alsTarget
+					alsTarget = qrySumBuild & ".Origin_ID"
+					fltWorkingID = alsTarget
+					alsTarget = qrySumBuild & ".RowID"
+					intRowIDCapture = alsTarget
+
+					If tagDebug = True then
+						print "fltTempValue: " + Str$(fltTempValue) + " : fltRollingSum: " + Str$(fltRollingSum) + " : intTargetID: " + Str$(intTargetID)
+					End If
+
+					If tagLimitExceeded = True Then
+						' just delete the row!
+
+						Delete From qrySumBuild Where Rowid = intRowIDCapture
+
+					Else
+						If (fltRollingSum + fltTempValue) > Val(strMaxValue) then
+							'exceeded! need to capture this position + reset tag
+							tagLimitExceeded = True
+
+							intCatchmentID(intCounter) = intTargetID
+							fltCatchmentUpper(intCounter) = intRowIDCapture
+							intCounter = intCounter + 1
+
+							Delete From qrySumBuild Where Rowid = intRowIDCapture
+
+							If tagDebug = True then
+								Print "Value Exceeded" + str$(intCounter) + ". Updated tag (" + Str$(intCatchmentID(intCounter)) + ") + stored max value (" + Str$(fltCatchmentUpper(intCounter)) + ")."
+							End If
+
+						else
+							'proceed to update rolling sum
+							fltRollingSum = fltRollingSum + fltTempValue
+
+							If tagDebug = True then
+								print "Update RollingSum: " + Str$(fltRollingSum)
+								print "Origin_ID: " + Str$(fltWorkingID)
+							End If
+
+						End If
+					End If
+
+					If tagDebug = True then
+						print "Fetch Next From qrySumBuild"
+					End If
+
+'					If Not EOT (qrySumBuild) Then
+'						Fetch Next From qrySumBuild
+'					else
+'						tagLimitExceeded = True
+'						If tagDebug = True Then
+'							Print "tagLimitExceeded = True"
+'						End If
+'					end if
+					Fetch Next from qrySumBuild
+				Loop
+
+				If tagDebug = True then
+					print "Fetch Next From t_rnd"
+				End If
+
+			Fetch Next From t_rnd
+		Loop
+
+
+		If tagDebug = True then
+			Print "-x-x-x- Max Value Dump"
+
+			For i = 1 to intCatchmentCount
+				Print "i: " + Str$(i)
+				Print "ID = " + Str$(intCatchmentID(i))
+				Print "MaxVal = " + Str$(fltCatchmentUpper(i))
+			Next
+		End If
+		'Exit Sub
+		'clean up temp table
+
+		Close Table qrySumBuild
+
+	End If
+
+'	If tagDebug = True then
+'		Print "Remove rows from tmpBrowser"
+'	End If
+'
+'	Delete from tmpBrowser where ObjRemove=True
+
+	strCosmetic = WindowInfo(FrontWindow(),WIN_INFO_TABLE)
+
+'	fltCurrentSearchRadius = 0
+'
+'	fltTarget = val(strTable)
+'
+'	If tagDebug = true then
+'
+'		Print "Target: "
+'		Print fltTarget
+'
+'	End If
+
+	'Setup Loop for Origin Table
+	'For each rec
+	'Select N recs from Destination table
+		'Select all recs, create convex hull, insert into cosmetic
+		'Select all recs, find max distance, buffer, insert into cosmetic
+		'Select all recs, combine into single obj, insert into cosmetic
+		'Select all recs, Create Polylines, insert into cosmetic
+
+	intCounter = 1
+
+	Fetch First From t_rnd
+	Do While Not EOT(t_rnd)
+
+		alsTarget = t_rnd +".obj"
+		objTarget = alsTarget
+
+		alsTarget = t_rnd + "." +  ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME)
+		intTargetID = alsTarget
+
+		'If intCatchmentType = 2 then
+			'=2 means we are SUM'ing values and need to filter on max value
+
+			'strSQL = "Select * from tmpBrowser where Dest_ID = " & str$(intTargetID) & " AND RowID <= " & Str$(fltCatchmentUpper(intCounter)) & " Order By Distance into Selection"
+			'intCounter = intCounter + 1
+		'Else
+			'assume buffer
+			strSQL = "Select * from tmpBrowser where Dest_ID = " & str$(intTargetID) & " Order By Distance into Selection"
+		'End If
+
+		If tagDebug = True then
+			Print "Loop: " + Str$(intTargetID)
+			Print strSQL
+		End If
+
+		Run Command strSQL
+
+		strQueryTableName = SelectionInfo(SEL_INFO_SELNAME)
+
+		If TableInfo(Selection, TAB_INFO_NROWS) = Val(strMaxValue) then
+			'Max distance will be last rec
+			Fetch Rec Val(strMaxValue) from Selection
+			alsTarget = selection + ".Distance"
+			fltMaxDistance = alsTarget
+		Else
+			Fetch Rec TableInfo(Selection, TAB_INFO_NROWS) from Selection
+			alsTarget = selection + ".Distance"
+			fltMaxDistance = alsTarget
+		End If
+
+		'objBuilder = ConvexHull(selection.obj)
+		'Insert Into WindowInfo(FrontWindow(), WIN_INFO_TABLE) (obj) Values (ConvexHull(selection.obj))
+		Do Case intCatchmentDef
+			Case 1
+				'=Radius
+				If tagDebug = True Then
+					Print "Create Buffer: " + Str$(fltMaxDistance)
+				End If
+
+				'Note need to add 'fudge factor' as buffer on circle isn't selecting all points
+				fltMaxDistance = fltMaxDistance * 1.001
+
+				objBuffer = Buffer(objTarget, 120, fltMaxDistance, "km")
+				'Insert Into strCosmetic (obj) Values (objBuffer)
+				Insert Into gstrFileName (SiteID, obj) Values (intTargetID, objBuffer)
+
+				'Create Object As Buffer From Selection Into Table strCosmetic
+
+			Case 2
+				'=Convex Hull
+				'Create Object As ConvexHull From Selection Into Table strCosmetic
+				'Create Object As ConvexHull From Selection Into Table gstrFileName
+				Create Object As ConvexHull From Selection Into Table gstrFileName Data SiteID=intTargetID
+
+			Case 3
+				'=Combine Objs
+				'need to select individual points, insert into new table
+				'e.g. Select * from Syd_Features, tmpBrowser where tmpBrowser.Dest_ID=105 AND Syd_Features.Key=tmpBrowser.Origin_ID into qry_CombineObjs
+				't_rnd + "." +  ColumnInfo(t_rnd,"COL" & Str$(rnd_col),COL_INFO_NAME)
+
+				strSQL = "Select * from " & t_rnd2 & ", tmpBrowser where tmpBrowser.Dest_ID=" & Str$(intTargetID) & " AND " & t_rnd2 & "." & ColumnInfo(t_rnd2,"COL" & Str$(rnd_col2),COL_INFO_NAME) & "=tmpBrowser.Origin_ID into qry_CombineObjs"
+
+				If tagDebug = True then
+					Print "Combine Objs strSQL: " + strSQL
+				End If
+
+				Run Command strSQL
+
+
+				'Create Object As Union From Selection Into Table strCosmetic
+				'Create Object As Union From Selection Into Table gstrFileName
+				Create Object As Union From Selection Into Table gstrFileName Data SiteID=intTargetID
+
+				Close Table qry_CombineObjs
+
+			Case 4
+				'=Spiders
+
+				'one option would be to:
+				'- take a Save Copy As from tmpBrowser
+				'- open new table
+				'- Combine Using Column based on DestinationID
+				'OR
+				'- select from tmpBrowser for each DestinationID unique value
+				'- combine from Selection, insert into Named_Table
+
+				strSQL = "Select * from tmpBrowser where tmpBrowser.Dest_ID=" & Str$(intTargetID) & " into qry_CombineObjs"
+
+				If tagDebug = True then
+					Print "Spider Objs strSQL: " + strSQL
+				End If
+
+				Run Command strSQL
+
+
+				'Create Object As Union From Selection Into Table strCosmetic
+				'Create Object As Union From Selection Into Table gstrFileName
+				Create Object As Union From Selection Into Table gstrFileName Data SiteID=intTargetID
+
+				'clean up
+				Close Table qry_CombineObjs
+				Close Table strQueryTableName
+
+		End Case
+
+		Fetch Next From t_rnd
+	Loop
+
+	'quick check to confirm table is visible in front window & if not add it in...
+	Dim intLayers as integer
+	Dim tagLayerInMap as Logical
+
+	tagLayerInMap = False
+	intLayers = MapperInfo(FrontWindow(),MAPPER_INFO_LAYERS)
+
+	For i = 1 to intLayers
+		If LayerInfo(FrontWindow(),i,LAYER_INFO_NAME) = gstrFileName Then
+			'found the magic layer
+			tagLayerInMap = True
+		End If
+
+	Next
+
+	If tagLayerInMap = False then
+		'need to add it in
+		Add Map Window FrontWindow() Auto Layer gstrFileName
+	End If
+
+	'now tag Site w/ Destination
+
+	If tagSiteOrigin = True then
+
+		'1. check if field exists
+		'1a. create field (if required)
+		'2. match up & update
+		If CheckFieldExists(t_rnd2, "DestinationID") = False then
+			'field does not exist, let's add it in....
+			Alter Table t_rnd2 ( add DestinationID Integer )
+
+		else
+			'field exists, let's zero it
+			strSQL = "Update " & t_rnd2 & " Set DestinationID = 0 DropIndex Auto"
+
+			If tagDebug = True then
+				Print "strSQL: " + strSQL
+			End If
+			Run Command strSQL
+
+		End If
+
+		'ok next is to update...
+		Add Column t_rnd2 (DestinationID )From tmpBrowser Set To Dest_ID Where "COL" & Str$(rnd_col2) = "COL" & Str$(rnd_col)
+
+'		If tagDebug = True then
+'			Print "strSQL: " + strSQL
+'		End If
+	End If
+
+	Drop Table tmpBrowser
+	Set Event Processing On
+
+End Sub
+
+Function SumWithinBuffer(ByVal fltTestDistance as float, ByVal strBaseTable as string, ByVal strCol as string, ByVal fltCentreX as float, ByVal fltCentreY as float) as float
+
+	'function to check the sum value of objects within the buffer
+
+	Dim strSQLGroups as string
+
+	'dynamically select the objects and sum the numeric column in 1 hit
+	strSQLGroups = "Select Sum(" + col_name + ") from " + t_rnd + " where SphericalDistance(CentroidX(" + t_rnd + ".obj),CentroidY(" + t_rnd + ".obj)," + fltX + "," + fltY + ",""m"")<" +fltTestDistance +" into tmp_GroupBy"
+
+	'Browse * from tmp_GroupBy
+
+	If tagDebug = true then
+		Print strSQLGroups
+	End If
+
+	'execute command
+	Run Command strSQLGroups
+
+	Dim fltTotal as float
+
+	'now get the summed aggregate value
+	Fetch First from tmp_GroupBy
+	fltTotal = tmp_GroupBy.col1
+
+	If tagDebug = true then
+		Print fltTotal
+	end if
+
+	'get rid of table
+	Close Table tmp_GroupBy
+
+	'pass the sum back to the calling routine
+	SumWithinBuffer = fltTotal
+
+End Function
+
+Function opentabs$() as string
+
+	'generate list of all open tables
+   dim num_open, i as smallint
+   dim table_list as string
+
+   num_open = NumTables()
+
+   For i = 1 to num_open
+
+'      If tableinfo(i,TAB_INFO_MAPPABLE) Then
+          table_list = table_list + tableinfo(i,TAB_INFO_NAME) + ";"
+'      End If
+
+   Next
+   opentabs$ = table_list
+End Function
+
+Sub chk_rnd
+
+	'dialog box handler
+	dim num_cols, file_num, i as smallint
+	dim coltype, colname, colwidth, coldecimals, colnum as string
+
+	If tagDebug = True then
+
+		Print "triggercontrol: " & str$(triggercontrol())
+		Print (readcontrolvalue(triggercontrol()))
+
+	End If
+
+	do case triggercontrol()
+		case 1
+			If readcontrolvalue(1) <> 0 then
+				t_rnd=getliststring$(strTableList,readcontrolvalue(1))
+				file_num = tableinfo(t_rnd,TAB_INFO_NUM)
+				num_cols = numcols(file_num)
+				col_list = ""
+				For i = 1 to num_cols
+					colnum = "col"+str$(i)
+					do case columninfo(file_num,colnum,COL_INFO_TYPE)
+						case COL_TYPE_CHAR
+							coltype = "CH"
+						case COL_TYPE_DECIMAL
+							coltype = "DE"
+						case COL_TYPE_FLOAT
+							coltype = "FL"
+						case COL_TYPE_INTEGER
+							coltype = "IN"
+						case COL_TYPE_SMALLINT
+							coltype = "SM"
+						case COL_TYPE_DATE
+							coltype = "DA"
+						case COL_TYPE_LOGICAL
+							coltype = "LO"
+						case COL_TYPE_GRAPHIC
+							coltype = "GR"
+					end case
+					colwidth    = str$(columninfo(file_num,colnum,COL_INFO_WIDTH))
+					coldecimals = str$(columninfo(file_num,colnum,COL_INFO_DECPLACES))
+					colname = columninfo(file_num,colnum,COL_INFO_NAME)
+
+
+					'if coltype <> "DA" and coltype <> "GR" and coltype <> "CH" and coltype <> "LO" then
+						col_list = col_list +  colname + space$(15-len(colname)) + ";"
+					'end if
+				Next
+				if col_list = "" then
+					alter control 2 hide
+					alter control 3 hide
+				else
+					alter control 2 show
+					alter control 3 show title col_list
+				end if
+			else
+				alter control 2 hide
+				alter control 2 hide
+			end if
+
+		case 3
+			If tagDebug = True then
+				Print "Case 3"
+				'Print "triggercontrol: " & str$(triggercontrol())
+				'Print (readcontrolvalue(triggercontrol()))
+			End If
+
+			if commandinfo(CMD_INFO_DLG_DBL) then
+				double = TRUE
+				rnd_col = readcontrolvalue(3)
+
+				If tagDebug = True then
+					Print "rnd_col: " + str$(rnd_col)
+				End If
+
+				dialog remove
+			else
+				rnd_col = readcontrolvalue(3)
+				double = FALSE
+			end if
+		case 4
+			If readcontrolvalue(4) <> 0 then
+				t_rnd2=getliststring$(strTableList,readcontrolvalue(4))
+				file_num = tableinfo(t_rnd2,TAB_INFO_NUM)
+				num_cols = numcols(file_num)
+				col_list = ""
+				For i = 1 to num_cols
+					colnum = "col"+str$(i)
+					do case columninfo(file_num,colnum,COL_INFO_TYPE)
+						case COL_TYPE_CHAR
+							coltype = "CH"
+						case COL_TYPE_DECIMAL
+							coltype = "DE"
+						case COL_TYPE_FLOAT
+							coltype = "FL"
+						case COL_TYPE_INTEGER
+							coltype = "IN"
+						case COL_TYPE_SMALLINT
+							coltype = "SM"
+						case COL_TYPE_DATE
+							coltype = "DA"
+						case COL_TYPE_LOGICAL
+							coltype = "LO"
+						case COL_TYPE_GRAPHIC
+							coltype = "GR"
+					end case
+					colwidth    = str$(columninfo(file_num,colnum,COL_INFO_WIDTH))
+					coldecimals = str$(columninfo(file_num,colnum,COL_INFO_DECPLACES))
+					colname = columninfo(file_num,colnum,COL_INFO_NAME)
+
+
+					'if coltype <> "DA" and coltype <> "GR" and coltype <> "CH" and coltype <> "LO" then
+						col_list = col_list +  colname + space$(15-len(colname)) + ";"
+					'end if
+				Next
+
+				if col_list = "" then
+					alter control 5 hide
+					alter control 6 hide
+				else
+					alter control 5 show
+					alter control 6 show title col_list
+					alter control 27 title col_list
+				end if
+
+			else
+				alter control 6 hide
+				alter control 5 hide
+			end if
+		case 6
+			If tagDebug = True then
+				Print "Case 6"
+				'Print "triggercontrol: " & str$(triggercontrol())
+				'Print (readcontrolvalue(triggercontrol()))
+			End If
+
+			if commandinfo(CMD_INFO_DLG_DBL) then
+				double = TRUE
+				rnd_col2 = readcontrolvalue(6)
+
+				If tagDebug = True then
+					Print "rnd_col2: " + str$(rnd_col2)
+				End If
+
+				dialog remove
+			else
+				rnd_col2 = readcontrolvalue(6)
+				double = FALSE
+			end if
+		case 27
+			'click on drop-down for SUM field
+			If tagDebug = True then
+				Print "Case 27"
+				'Print "triggercontrol: " & str$(triggercontrol())
+				'Print (readcontrolvalue(triggercontrol()))
+			End If
+
+			rnd_col3 = readcontrolvalue(27)
+
+		case 28
+			If readcontrolvalue(28) = 1 then
+				alter control 27 disable
+			else
+				alter control 27 enable
+			End If
+	end case
+End Sub
+
+Sub chk_filename
+
+	'if filename box was doubleclicked then set debug flag
+'	If CommandInfo(CMD_INFO_DLG_DBL) Then
+'	commandinfo(CMD_INFO_DLG_OK) or double
+'		If tagDebug = False then
+'			tagDebug = True
+'			Print "TagDebug = True"
+'		Else
+'			tagDebug = False
+'			Print "TagDebug = False"
+'		End If
+''		tagdebug = True
+'
+'	End If
+
+End Sub
+
+
+Function getliststring$(byval inlist as string, byval choice as smallint) as string
+dim ctr, index1, index2 as smallint
+  index2 = 0
+  ctr = 1
+  while ctr <= choice
+    index1 = index2+1
+    index2 = instr(index1,inlist,";")
+    if index2 = 0 then
+      getliststring$ = right$(inlist,len(inlist)-index1+1)
+    else
+      getliststring$ = mid$(inlist,index1,index2-index1)
+    end if
+    ctr = ctr + 1
+  wend
+End Function
+
+Function FixWhiteSpace(ByVal strInput as string) as string
+
+	'remove whitespace from string
+	Dim intLength as integer
+	Dim j as integer
+	Dim strBuilding as string
+	Dim strChecking as string
+
+	intLength = len(strInput)
+
+	For j = 1 to intLength
+
+		strChecking = mid$(strInput,j,1)
+
+		If strChecking = " " then
+			strBuilding = strBuilding + "_"
+		else
+			strBuilding = strBuilding + strChecking
+		end if
+	Next
+
+	FixWhiteSpace = strBuilding
+End Function
+
+Sub About
+'text that is seen in the about box
+Dialog
+    Title "Catchment Boundary Maker"
+    Width 280
+    Height 170
+
+  Control StaticText
+    Title "This program is a utility that will attempt to determine a catchment boundary."
+    Position 10,10
+  Control StaticText
+    Title "Given a starting point && aggregate number for the catchment, the MBX will select"
+    Position 10, 20
+  Control StaticText
+    Title "surrounding objects (points or polygons) aggregating by either a raw count or"
+    Position 10,30
+  Control StaticText
+    Title "by calculating the sum of a numeric field to meet the nominated target number"
+    Position 10,40
+  Control StaticText
+    Title "for the catchment."
+    Position 10,50
+  Control StaticText
+	Title "PLEASE NOTE: This utility is provided free of charge. It is intended to increase"
+	Position 10,80
+  Control StaticText
+	Title "your effectiveness in the use of MapInfo Pro.  However, no warranty is made as to its use"
+	Position 10,90
+  Control StaticText
+	Title "or operation. No committment is made to update or support this utility in any fashion."
+	Position 10,100
+  Control StaticText
+	Title "Please feel free to distribute this utility to your fellow MapInfo users."
+	Position 10,110
+  Control StaticText
+	Title "Copyright March 2005"
+	Position 10,130
+  Control OKButton
+	Position 120,150
+
+End Sub
+
+Function CheckLayerOpen(ByVal strLayerName as string) as logical
+
+	Dim inttablesopen, i as integer
+
+	inttablesopen = NumTables()
+
+	CheckLayerOpen = False
+
+	For i = 1 to inttablesopen
+
+		If TableInfo(i,TAB_INFO_NAME) = strLayerName Then
+			CheckLayerOpen = True
+		End If
+	Next
+
+end function
+
+Function CheckFieldExists(ByVal strTableName as string, ByVal strFieldName as string) as logical
+
+	Dim intcols, i as integer
+
+	intcols = TableInfo(strTableName, TAB_INFO_NCOLS)
+
+	CheckFieldExists = False
+
+	For i = 1 to intcols
+
+		If ColumnInfo(strTableName, "COL" + Str$(i),COL_INFO_NAME) = strFieldName Then
+			CheckFieldExists = True
+		End If
+	Next
+
+end function
+
+Sub TableOps(ByVal strTableName as string)
+
+	'1. is it open?
+	'1a. If Yes - delete existing rows 'Ask'
+	'2. create new file, check if physically exists
+
+	Dim intTableCount as integer
+	Dim intCounter as integer
+	Dim tagTableExists as logical
+	Dim tagClearExisting as logical
+	Dim tagCreateNew as logical
+	Dim strCompleteName as string
+	Dim strPathTableName as string
+	Dim strFileName as string
+
+	tagTableExists = False
+	intTableCount = NumTables()
+
+	intCounter = 1
+
+	If tagDebug = True then
+		Print "Check for Existing Loop..."
+		Print "intTableCount: " + Str$(intTableCount)
+	End If
+
+	Do
+
+		If tagDebug = True then
+			Print strTableName + " .v. " + TableInfo(intCounter, TAB_INFO_NAME)
+		End If
+
+		If TableInfo(intCounter, TAB_INFO_NAME) = strTableName then
+			'found a match!
+			tagTableExists = True
+
+			If tagDebug = True then
+				Print "Exists flag Tripped!"
+			End If
+
+		End If
+
+		intCounter = intCounter + 1
+
+	Loop While intCounter < (intTableCount + 1)
+
+	If tagDebug = true then
+		Print "TableOps - tagTableExists: " + str$(tagTableExists)
+	End If
+
+	if tagTableExists = True then
+		'prompt for next action as table is already open
+		tagCreateNew = Ask("Table: " + strTableName + " already exists. Would you like to create a fresh timestamped version or reuse the existing?", "Fresh", "Reuse")
+
+		tagClearExisting = Ask("Would you like to remove existing objects or append objects?", "Remove", "Append")
+
+		If tagCreateNew = True Then
+			'create new ver here
+
+		ElseIf tagCreateNew = False and tagClearExisting = True then
+			'TODO: Add line to delete objs from table
+			Delete From strTableName
+			'Reset global Table Name
+
+			If tagDebug = True then
+				Print "Table (" + strTableName + ") Cleared out!"
+			End If
+
+		End If
+
+	End If
+
+	If tagDebug = true then
+		Print "TableOps - tagTableExists: " + str$(tagTableExists)
+		Print "TableOps - tagCreateNew: " + str$(tagCreateNew)
+	End If
+
+	If (tagCreateNew = True AND tagTableExists = True) or tagTableExists = False then
+
+		'this picks up multiple conditions where the
+		'table doesnt exist to need to build it
+		strFileName = BuildDateTimeStamp()
+
+		If tagTableExists = False then
+			'instruction from main Dialog to create new, therefore don't append suffix to make unique
+			strCompleteName = strTableName
+		else
+			'here we have a potential duplicate, append suffix to make unique
+			strCompleteName = strTableName + strFileName
+		End If
+
+		strPathTableName = ApplicationDirectory$() + strCompleteName
+
+		If tagDebug = True then
+			Print "strFileName: " + strFileName
+			Print "strCompleteName: " + strCompleteName
+			Print "strPathTableName: " + strPathTableName
+		End If
+
+		Create Table strCompleteName (SiteID Char(10)) file strPathTableName TYPE NATIVE Charset "WindowsLatin1"
+		Create Map For strCompleteName 'CoordSys Using t_rnd2
+
+		'lastly need to update the global variable with the new name...
+		gstrFileName = strCompleteName
+
+	End If
+
+End Sub
+
+
+Function BuildDateTimeStamp() As String
+
+	Dim strYear as string
+	Dim strMonth as string
+	Dim strDay as string
+	Dim strTime as string
+	Dim strFinal as string
+
+	strYear = Year(CurDate())
+	strMonth = Month(CurDate())
+	If Len(strMonth) = 1 then
+		strMonth = "0" + strMonth
+	End If
+	strDay = Day(CurDate())
+	If Len(strDay) = 1 then
+		strDay = "0" + strDay
+	End If
+	strTime = FormatTime$(CurTime(), "HHmmss")
+
+	strFinal = "_" + strYear + strMonth + strDay + strTime
+
+	BuildDateTimeStamp = strFinal
+
+End Function
